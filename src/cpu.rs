@@ -1,10 +1,17 @@
 #![allow(unused)]
 
-use std::{fs::FileTimes, io::repeat};
+use std::fmt::DebugStruct;
 
-use crate::{error::Error, instruction::Instruction, utils::bitmatch};
+use crate::error::Error;
+use crate::instruction::Instruction;
+use crate::utils::*;
 
 const RAM_SIZE: usize = 65536;
+const CARRY_BIT: u8 = 0;
+const PARITY_BIT: u8 = 2;
+const AUXILIARY_CARRY_BIT: u8 = 4;
+const ZERO_BIT: u8 = 6;
+const SIGN_BIT: u8 = 7;
 
 #[derive(Debug)]
 pub struct Cpu {
@@ -17,8 +24,6 @@ pub struct Cpu {
     h: u8,
     l: u8,
 
-    
-    
     sp: u16,
     pc: u16,
 
@@ -220,23 +225,118 @@ impl Cpu {
         use Instruction::*;
         
         match instruction {
+            NOP => (),
+            CMC => self.flag ^= 1 << CARRY_BIT,
+            STC => self.flag |= 1 << CARRY_BIT,
+            INR(reg_idx) => {
+                let src = self.get_src(reg_idx);
+                let (res, _, parity, auxiliary_carry, zero, sign) = flagged_add(*src, 1);
+                *src = res;
+                self.set_flag(None, Some(parity), Some(auxiliary_carry), Some(zero), Some(sign));
+            },
+            DCR(reg_idx) => {
+                let src = self.get_src(reg_idx);
+                let (res, _, parity, auxiliary_carry, zero, sign) = flagged_sub(*src, 1);
+                *src = res;
+                self.set_flag(None, Some(parity), Some(auxiliary_carry), Some(zero), Some(sign));
+            },
+            CMA => self.a = !self.a,
+            DAA => {
+                todo!()
+            },
+            MOV(dst, src) => {
+                let src = *self.get_src(src);
+                let dst = self.get_src(dst);
+                *dst = src;
+            },
+            SATX(rp) => {
+                match rp {
+                    0 => self.ram[self.get_bc_addr() as usize] = self.a,
+                    1 => self.ram[self.get_de_addr() as usize] = self.a,
+                    _ => unreachable!(),
+                };
+            },
+            LDAX(rp) => {
+                match rp {
+                    0 => self.a = self.ram[self.get_bc_addr() as usize],
+                    1 => self.a = self.ram[self.get_de_addr() as usize],
+                    _ => unreachable!(),
+                };
+            },
+            ADD(reg) => {
+                let src = *self.get_src(reg);
+                let (res, carry, parity, aux, zero, sign) = flagged_add(self.a, src);
+                self.a = res;
+                self.set_flag(Some(carry), Some(parity), Some(aux), Some(zero), Some(sign));
+            },
+            ADC(reg) => {
+                let src = *self.get_src(reg);
+                let (res, carry, parity, aux, zero, sign) = flagged_add(res, src + 1);
+                self.a = res;
+                self.set_flag(Some(carry), Some(parity), Some(aux), Some(zero), Some(sign));
+            },
+            SUB(reg) => {
+                let src = *self.get_src(reg);
+                let (res, carry, parity, aux, zero, sign) = flagged_sub(self.a, src);
+                self.a = res;
+                self.set_flag(Some(carry), Some(parity), Some(aux), Some(zero), Some(sign));
+            },
+            SBB(reg) => {
+                let src = *self.get_src(reg);
+                let (res, carry, parity, aux, zero, sign) = flagged_sub(self.a, src.wrapping_add(1));
+                self.a = res;
+                self.set_flag(Some(carry), Some(parity), Some(aux), Some(zero), Some(sign));
+            },
+
             _ => ()
         };
 
         Ok(())
     }
 
-    fn idx2reg(&self, idx: u8) -> u8 {
+    fn get_src(&mut self, reg_idx: u8) -> &mut u8 {
+        if reg_idx == 6 {
+            &mut self.ram[self.get_hl_addr() as usize]
+        } else {
+            self.idx2reg(reg_idx)
+        }
+    }
+
+    fn idx2reg(&mut self, idx: u8) -> &mut u8 {
         match idx {
-            0 => self.a,
-            1 => self.b,
-            2 => self.c,
-            3 => self.d,
-            4 => self.e,
-            5 => self.h,
-            7 => self.l,
+            0 => &mut self.b,
+            1 => &mut self.c,
+            2 => &mut self.d,
+            3 => &mut self.e,
+            4 => &mut self.h,
+            5 => &mut self.l,
+            7 => &mut self.a,
             _ => unreachable!(),
         }
+    }
+
+    fn set_flag(&mut self, carry: Option<bool>, parity: Option<bool>, aux: Option<bool>, zero: Option<bool>, sign: Option<bool>) {
+        carry.map(|carry| if carry { self.flag &= 1 << CARRY_BIT });
+        parity.map(|parity| if parity { self.flag &= 1 << PARITY_BIT });
+        aux.map(|auxiliary_carry| if auxiliary_carry { self.flag &= 1 << AUXILIARY_CARRY_BIT });
+        zero.map(|zero| if zero { self.flag &= 1 << ZERO_BIT });
+        sign.map(|sign| if sign { self.flag &= 1 << SIGN_BIT });
+    }
+
+    fn get_flag(&self, bit: u8) -> bool {
+        (self.flag & (1 << bit)) >> bit == 1
+    }
+
+    fn get_hl_addr(&self) -> u16 {
+        ((self.h as u16) << 8) | self.l as u16
+    }
+
+    fn get_bc_addr(&self) -> u16 {
+        ((self.b as u16) << 8) | self.c as u16
+    }
+
+    fn get_de_addr(&self) -> u16 {
+        ((self.d as u16) << 8) | self.e as u16
     }
 
     fn next_byte(&mut self) -> u8 {
