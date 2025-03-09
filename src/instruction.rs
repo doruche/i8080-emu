@@ -5,24 +5,24 @@ pub enum Instruction {
     CMC, STC,
 
     // Single register instructions
-    INR(u8), DCR(u8), CMA, DAA,
+    INR(Src), DCR(Src), CMA, DAA,
 
     // Nop instructions
     NOP,
 
     // Data transfer instructions
-    MOV(u8, u8), SATX(u8), LDAX(u8), 
+    MOV(Src, Src), SATX(RegPair), LDAX(RegPair), 
 
     // Register or memory to accumulator instructions
-    ADD(u8), ADC(u8), SUB(u8), SBB(u8),
-    ANA(u8), XRA(u8), ORA(u8), CMP(u8),
+    ADD(Src), ADC(Src), SUB(Src), SBB(Src),
+    ANA(Src), XRA(Src), ORA(Src), CMP(Src),
 
     // Rotate accumulator instructions
     RLC, RRC, RAL, RAR,
 
     // Register pair instructions
-    PUSH(u8), POP(u8), DAD(u8), INX(u8),
-    DCX(u8), XCHG, XTHL, SPHL,
+    PUSH(RegPair), POP(RegPair), DAD(RegPair), INX(RegPair),
+    DCX(RegPair), XCHG, XTHL, SPHL,
 
     // Immediate instructions
     LXI(u8, u8, u8), MVI(u8, u8), ADI(u8),
@@ -52,4 +52,14 @@ pub enum Instruction {
 
     // HLT halt instruction
     HLT,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub enum Src {
+    B, C, D, E, H, L, A, Mem,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub enum RegPair {
+    BC, DE, HL, PSW,
 }
