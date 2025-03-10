@@ -8,8 +8,9 @@
 
 ---
 
-参考：
-  Intel 8080 Assembly Language Programming Manual
+参考:
+  
+  [Intel 8080 Assembly Language Programming Manual](https://altairclone.com/downloads/manuals/8080%20Programmers%20Manual.pdf)
 
 ​	[Intel 8080 OPCODES](https://www.pastraiser.com/cpu/i8080/i8080_opcodes.html)
 
