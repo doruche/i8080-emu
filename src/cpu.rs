@@ -2,7 +2,9 @@
 
 use std::arch::x86_64::_SIDD_CMP_EQUAL_ANY;
 use std::fmt::DebugStruct;
+use std::time;
 
+use crate::device::Device;
 use crate::dram::Dram;
 use crate::error::Error;
 use crate::instruction::{Instruction, RegPair, Src};
@@ -10,29 +12,36 @@ use crate::utils::*;
 
 pub const RAM_SIZE: usize = 65536;
 
-const CARRY_BIT: u8 = 0;
-const PARITY_BIT: u8 = 2;
-const AUXILIARY_CARRY_BIT: u8 = 4;
-const ZERO_BIT: u8 = 6;
-const SIGN_BIT: u8 = 7;
+const CLOCK_RATE: u32 = 2_000_000; // 2.0MHz
+const STEP_TIME: u32 = 16;
+const STEP_CYCLES: u32 = (STEP_TIME as f64 / (1000_f64 / CLOCK_RATE as f64)) as u32;
+const PORT_NUM: usize = 256;   // i8080 adopts PMIO.
 
-#[derive(Debug)]
+pub const CARRY_BIT: u8 = 0;
+pub const PARITY_BIT: u8 = 2;
+pub const AUXILIARY_CARRY_BIT: u8 = 4;
+pub const ZERO_BIT: u8 = 6;
+pub const SIGN_BIT: u8 = 7;
+
 pub struct Cpu {
-    a: u8,  // accumulator
+    pub a: u8,  // accumulator
 
-    b: u8,
-    c: u8,
-    d: u8,
-    e: u8,
-    h: u8,
-    l: u8,
+    pub b: u8,
+    pub c: u8,
+    pub d: u8,
+    pub e: u8,
+    pub h: u8,
+    pub l: u8,
 
-    sp: u16,
-    pc: u16,
-
-    ram: Dram,
-    flag: u8,
-    inte: bool,
+    pub sp: u16,
+    pub pc: u16,
+    pub halted: bool,
+    pub flag: u8,
+    pub inte: bool,
+    pub step_cycles: u32,
+    pub step_zero: time::SystemTime,
+    pub ram: Dram,
+    pub devices: [Option<Box<dyn Device>>; PORT_NUM],
 }
 
 // interface
@@ -47,24 +56,73 @@ impl Cpu {
             h: 0,
             l: 0,
             sp: RAM_SIZE as u16,
-            pc: 0x40, // 0x00 ~ 0x3f for rst instructions.
+            pc: 0, // 0x00 ~ 0x3f for rst instructions.
+            halted: false,
+            step_cycles: 0,
+            step_zero: time::SystemTime::now(),
             ram: Dram::new(),
+            devices: [const { None }; PORT_NUM],
             flag: 2, // 0bsz0c0p1c
             inte: false, 
         }
     }
 
-    pub fn load(&mut self, data: &[u8]) {
-        todo!()
+    pub fn load(mut self, data: &[u8]) -> Self {
+        self.ram.load_slice(data);
+        self
     }
 
     pub fn run(&mut self) -> Result<(), Error> {
         loop {
+            if self.halted {
+                return Ok(());
+            }
             if self.pc as usize >= RAM_SIZE {
-                break Ok(());
+                return Err(Error::PcOutofRange);
             }
             let instruc = self.fetch()?;
             self.excecute(instruc)?;
+        }
+    }
+
+    pub fn next(&mut self) -> Result<(), Error> {
+        let ins = self.fetch()?;
+        self.excecute(ins)?;
+        Ok(())
+    }
+
+    pub fn test(&mut self) -> Result<(), Error> {
+        println!("*******************");
+        self.ram.save_byte(0x0005, 0xc9);
+        // Because tests used the pseudo instruction ORG 0x0100
+        self.pc = 0x0100;
+        loop {
+            if self.halted {
+                break Ok(());
+            }
+            self.next()?;
+            if self.pc == 0x05 {
+                if self.c == 0x09 {
+                    let mut a = self.get_de_addr();
+                    loop {
+                        let c = self.ram.load_byte(a);
+                        if c as char == '$' {
+                            break;
+                        } else {
+                            a += 1;
+                        }
+                        print!("{}", c as char);
+                    }
+                }
+                if self.c == 0x02 {
+                    print!("{}", self.e as char);
+                }
+            }
+            if self.pc == 0x00 {
+                println!("");
+                println!("");
+                break Ok(());
+            }
         }
     }
 }
@@ -77,6 +135,7 @@ impl Cpu {
         let first_byte = self.ram.load_byte(self.pc);
         self.pc += 1;
 
+    
         match first_byte {
             0 => Ok(NOP),
 
@@ -97,7 +156,7 @@ impl Cpu {
                 Ok(MOV(dst, src))
             },
             _ if bitmatch(first_byte, 0b00000010, 0b11100111) => {
-                let pair = idx2rp(first_byte & 0b00010000);
+                let pair = idx2rp_psw((first_byte & 0b00010000) >> 4);
                 if bittest(first_byte, 3) {
                     Ok(LDAX(pair))
                 } else {
@@ -128,23 +187,23 @@ impl Cpu {
             0b00011111 => Ok(RAR),
 
             _ if bitmatch(first_byte, 0b11000101, 0b11001111) => {
-                let rp = idx2rp((first_byte & 0b00110000) >> 4);
+                let rp = idx2rp_psw((first_byte & 0b00110000) >> 4);
                 Ok(PUSH(rp))
             },
             _ if bitmatch(first_byte, 0b11000001, 0b11001111) => {
-                let rp = idx2rp((first_byte & 0b00110000) >> 4);
+                let rp = idx2rp_psw((first_byte & 0b00110000) >> 4);
                 Ok(POP(rp))
             },
             _ if bitmatch(first_byte, 0b00001001, 0b11001111) => {
-                let rp = idx2rp((first_byte & 0b00110000) >> 4);
+                let rp = idx2rp_sp((first_byte & 0b00110000) >> 4);
                 Ok(DAD(rp))
             },
             _ if bitmatch(first_byte, 0b00000011, 0b11001111) => {
-                let rp = idx2rp((first_byte & 0b00110000) >> 4);
+                let rp = idx2rp_sp((first_byte & 0b00110000) >> 4);
                 Ok(INX(rp))
             }, 
             _ if bitmatch(first_byte, 0b00001011, 0b11001111) => {
-                let rp = idx2rp((first_byte & 0b00110000) >> 4);
+                let rp = idx2rp_sp((first_byte & 0b00110000) >> 4);
                 Ok(DCX(rp))
             },
             _ if bitmatch(first_byte, 0b11101011, 255) =>
@@ -158,13 +217,13 @@ impl Cpu {
                 let low_data = self.next_byte();
                 let high_data = self.next_byte();
                 let rp = (first_byte & 0b00110000) >> 4;
-                Ok(LXI(rp, low_data, high_data))
-            }
+                Ok(LXI(idx2rp_sp(rp), low_data, high_data))
+            },
             _ if bitmatch(first_byte, 0b00000110, 0b11000111) => {
-                let reg = (first_byte & 0b00111000) >> 4;
+                let reg = (first_byte & 0b00111000) >> 3;
                 let data = self.next_byte();
-                Ok(MVI(reg, data))
-            }
+                Ok(MVI(idx2src(reg), data))
+            },
 
             0b11000110 => Ok(ADI(self.next_byte())),
             0b11001110 => Ok(ACI(self.next_byte())),
@@ -211,6 +270,10 @@ impl Cpu {
             0b11101000 => Ok(RPE),
             0b11100000 => Ok(RPO),
 
+            _ if bitmatch(first_byte, 0b11000111, 0b11000111) => {
+                let exp = (first_byte & 0b00111000) >> 3;
+                Ok(RST(exp))
+            },
             0b11111011 => Ok(EI),
             0b11110011 => Ok(DI),
 
@@ -219,17 +282,36 @@ impl Cpu {
 
             0b01110110 => Ok(HLT),
 
-            _ => Err(Error::UnknownOpcode(first_byte))
+            _ => {
+                println!("unknown ins");
+                Err(Error::UnknownOpcode(first_byte))
+            }
         }
     }
 
     fn excecute(&mut self, instruction: Instruction) -> Result<(), Error> {
         use Instruction::*;
         
+        //println!(
+        //    "{:?} PC={:04x} SP={:04x} A={:02x} F={:02x} B={:02x} C={:02x} D={:02x} E={:02x} H={:02x} L={:02x} flag={:08b}",
+        //    &instruction,
+        //    self.pc,
+        //    self.sp,
+        //    self.a,
+        //    self.flag,
+        //    self.b,
+        //    self.c,
+        //    self.d,
+        //    self.e,
+        //    self.h,
+        //    self.l,
+        //    self.flag,
+        //);
+
         match instruction {
             NOP => (),
-            CMC => self.flag ^= 1 << CARRY_BIT,
-            STC => self.flag |= 1 << CARRY_BIT,
+            CMC => self.set_flag(CARRY_BIT, !self.get_flag(CARRY_BIT)),
+            STC => self.set_flag(CARRY_BIT, true),
             INR(src) => {
                 let src = self.get_src(src);
                 let (res, _, parity, auxiliary_carry, zero, sign) = flagged_add(*src, 1);
@@ -260,9 +342,9 @@ impl Cpu {
                     c = true;
                 }
 
-                let (res, carry, parity, aux, zero, sign) = flagged_add(self.a, self.a);
+                let (res, carry, parity, aux, zero, sign) = flagged_add(self.a, a);
                 self.a = res;
-                self.set_flags(Some(carry), Some(parity), Some(aux), Some(zero), Some(sign));               
+                self.set_flags(Some(carry), Some(parity), Some(aux), Some(zero), Some(sign));
 
                 self.set_flag(CARRY_BIT, c);
             },
@@ -292,11 +374,14 @@ impl Cpu {
                 self.set_flags(Some(carry), Some(parity), Some(aux), Some(zero), Some(sign));
             },
             ADC(reg) => {
-                let c = if self.get_flag(CARRY_BIT) {1} else {0};
-                let src = *self.get_src(reg);
-                let (res, carry, parity, aux, zero, sign) = flagged_add(self.a, src.wrapping_add(c));
+                let a = self.a;
+                let c = u8::from(self.get_flag(CARRY_BIT));
+                let src = (*self.get_src(reg));
+                let (res, _, parity, _, zero, sign) = flagged_add(self.a, src.wrapping_add(c));
                 self.a = res;
-                self.set_flags(Some(carry), Some(parity), Some(aux), Some(zero), Some(sign));
+                self.set_flags(Some(u16::from(a) + u16::from(c) + u16::from(src) > 0xff), 
+                Some(parity), Some((a & 0xf) + (src & 0xf) + c > 0xf), 
+                Some(zero), Some(sign));
             },
             SUB(reg) => {
                 let src = *self.get_src(reg);
@@ -305,11 +390,14 @@ impl Cpu {
                 self.set_flags(Some(carry), Some(parity), Some(aux), Some(zero), Some(sign));
             },
             SBB(reg) => {
-                let c = if self.get_flag(CARRY_BIT) {1} else {0};
+                let a = self.a;
+                let c = u8::from(self.get_flag(CARRY_BIT));
                 let src = *self.get_src(reg);
-                let (res, carry, parity, aux, zero, sign) = flagged_sub(self.a, src.wrapping_add(c));
+                let (res, _, parity, _, zero, sign) = flagged_sub(self.a, src.wrapping_add(c));
                 self.a = res;
-                self.set_flags(Some(carry), Some(parity), Some(aux), Some(zero), Some(sign));
+                self.set_flags(Some(u16::from(a) < u16::from(src) + u16::from(c)),
+                Some(parity), Some((a as i8 & 0x0f) - (src as i8 & 0x0f) - (c as i8) >= 0x00),
+                Some(zero), Some(sign));
             },
             ANA(reg) => {
                 self.a &= *self.get_src(reg);
@@ -324,10 +412,8 @@ impl Cpu {
                 self.set_logical_flag();
             },
             CMP(reg) => {
-                let a = self.a;
                 let (res, carry, parity, aux, zero, sign) = flagged_sub(self.a, *self.get_src(reg));
                 self.set_flags(Some(carry), Some(parity), Some(aux), Some(zero), Some(sign));
-                self.a = a;
             },
             RLC => {
                 let c = bittest(self.a, 7);
@@ -352,30 +438,31 @@ impl Cpu {
                 self.a = if c { 0x80 | (self.a >> 1) } else { self.a >> 1 };
             },
             PUSH(rp) => {
-                self.sp -= 2;
                 let (b1, b2) = match rp {
                     RegPair::BC => (self.b, self.c),
                     RegPair::DE => (self.d, self.e),
                     RegPair::HL => (self.h, self.l),
                     RegPair::PSW => (self.a, self.flag),
+                    _ => unreachable!(),
                 };
-                self.ram.save_byte(self.sp + 1, b1);
-                self.ram.save_byte(self.sp, b2);
+                self.push(get_u16(b1, b2));
             },
             POP(rp) => {
+                let (hi, lo) = split_u16(self.pop());
                 let (src1, src2) = match rp {
                     RegPair::BC => (&mut self.b, &mut self.c),
                     RegPair::DE => (&mut self.d, &mut self.e),
                     RegPair::HL => (&mut self.h, &mut self.l),
                     RegPair::PSW => (&mut self.a, &mut self.flag),
+                    _ => unreachable!(),
                 };
-                *src1 = self.ram.load_byte(self.sp + 1);
-                *src2 = self.ram.load_byte(self.sp);
-                self.sp += 2;
+                *src1 = hi;
+                *src2 = lo;
             },
             DAD(rp) => {
                 let x = self.get_rp_val(rp);
                 let (res, carry) = x.overflowing_add(get_u16(self.h, self.l));
+                (self.h, self.l) = split_u16(res);
                 self.set_flag(CARRY_BIT, carry);
             },
             INX(rp) => {
@@ -384,7 +471,8 @@ impl Cpu {
                     RegPair::BC => (self.b, self.c) = split_u16(x),
                     RegPair::DE => (self.d, self.e) = split_u16(x),
                     RegPair::HL => (self.h, self.l) = split_u16(x),
-                    RegPair::PSW => (self.a, self.flag) = split_u16(x),
+                    RegPair::SP => self.sp = self.sp.wrapping_add(1),
+                    _ => unreachable!(),
                 };
             },
             DCX(rp) => {
@@ -393,20 +481,177 @@ impl Cpu {
                     RegPair::BC => (self.b, self.c) = split_u16(x),
                     RegPair::DE => (self.d, self.e) = split_u16(x),
                     RegPair::HL => (self.h, self.l) = split_u16(x),
-                    RegPair::PSW => (self.a, self.flag) = split_u16(x),
+                    RegPair::SP => self.sp = self.sp.wrapping_sub(1),
+                    _ => unreachable!(),
                 };
             },
             XCHG => {
                 (self.d, self.h) = (self.h, self.d);
-                (self.e, self.l) = (self.l, self.d);
+                (self.e, self.l) = (self.l, self.e);
             },
             XTHL => {
                 let (h, l) = (self.h, self.l);
                 (self.h, self.l) = split_u16(self.ram.load_word(self.sp));
                 self.ram.save_word(self.sp, get_u16(h, l));
             },
-            SPHL => self.ram.save_word(self.sp, get_u16(self.h, self.l)),
-            _ => ()
+            SPHL => self.sp = get_u16(self.h, self.l),
+
+            LXI(rp, low_data, high_data) => {
+                match rp {
+                    RegPair::BC => (self.b, self.c) = (high_data, low_data),
+                    RegPair::DE => (self.d, self.e) = (high_data, low_data),
+                    RegPair::HL => (self.h, self.l) = (high_data, low_data),
+                    RegPair::SP => self.ram.save_word(self.sp, get_u16(high_data, low_data)),
+                    _ => unreachable!(),
+                };
+            },
+            MVI(src, data) => *self.get_src(src) = data,
+            ADI(data) => {
+                let (res, carry, parity, aux, zero, sign) = flagged_add(self.a, data);
+                self.a = res;
+                self.set_flags(Some(carry), Some(parity), Some(aux), Some(zero), Some(sign));               
+            },
+            ACI(data) => {
+                let (res, carry, parity, aux, zero, sign) = 
+                flagged_add(self.a, data.wrapping_add(u8::from(self.get_flag(CARRY_BIT))));
+                self.a = res;
+                self.set_flags(Some(carry), Some(parity), Some(aux), Some(zero), Some(sign));
+            },
+            SUI(data) => {
+                let (res, carry, parity, aux, zero, sign) = flagged_sub(self.a, data);
+                self.a = res;
+                self.set_flags(Some(carry), Some(parity), Some(aux), Some(zero), Some(sign));
+            },
+            SBI(data) => {
+                let a = self.a;
+                let c = u8::from(self.get_flag(CARRY_BIT));
+                let (res, _, parity, _, zero, sign) = flagged_sub(self.a, data.wrapping_add(c));
+                self.a = res;
+                self.set_flags(Some(u16::from(a) < u16::from(data) + u16::from(c)),
+                Some(parity), Some((a as i8 & 0x0f) - (data as i8 & 0x0f) - (c as i8) >= 0x00),
+                Some(zero), Some(sign));
+            },
+            ANI(data) => {
+                self.a &= data;
+                self.set_logical_flag();
+            },
+            XRI(data) => {
+                self.a ^= data;
+                self.set_logical_flag();
+            },
+            ORI(data) => {
+                self.a |= data;
+                self.set_logical_flag();
+            },
+            CPI(data) => {
+                let (res, carry, parity, aux, zero, sign) = flagged_sub(self.a, data);
+                self.set_flags(Some(carry), Some(parity), Some(aux), Some(zero), Some(sign));
+            },
+
+            STA(low_add, hi_add) => self.ram.save_byte(get_u16(hi_add, low_add), self.a),
+            LDA(low_add, hi_add) => self.a = self.ram.load_byte(get_u16(hi_add, low_add)),
+            SHLD(low_add, hi_add) => self.ram.save_word(get_u16(hi_add, low_add), get_u16(self.h, self.l)),
+            LHLD(low_add, hi_add) =>(self.h, self.l) = split_u16(self.ram.load_word(get_u16(hi_add, low_add))),
+
+            PCHL => self.pc = get_u16(self.h, self.l),
+            JMP(low_add, hi_add) => self.pc = get_u16(hi_add, low_add),
+            JC(low_add, hi_add) => if self.get_flag(CARRY_BIT) { self.pc = get_u16(hi_add, low_add) },
+            JNC(low_add, hi_add) => if !self.get_flag(CARRY_BIT) { self.pc = get_u16(hi_add, low_add) },
+            JZ(low_add, hi_add) => if self.get_flag(ZERO_BIT) { self.pc = get_u16(hi_add, low_add) },
+            JNZ(low_add, hi_add) => if !self.get_flag(ZERO_BIT) {  self.pc = get_u16(hi_add, low_add) },
+            JM(low_add, hi_add) => if self.get_flag(SIGN_BIT) { self.pc = get_u16(hi_add, low_add) },
+            JP(low_add, hi_add) => if !self.get_flag(SIGN_BIT) { self.pc = get_u16(hi_add, low_add) },
+            JPE(low_add, hi_add) => if self.get_flag(PARITY_BIT) { self.pc = get_u16(hi_add, low_add) },
+            JPO(low_add, hi_add) => if !self.get_flag(PARITY_BIT) { self.pc = get_u16(hi_add, low_add) },
+
+            CALL(low_add, hi_add) => {
+                self.push(self.pc);
+                self.pc = get_u16(hi_add, low_add);
+            },
+            CC(low_add, hi_add) => {
+                if self.get_flag(CARRY_BIT) {
+                    self.push(self.pc);
+                    self.pc = get_u16(hi_add, low_add);
+                }
+            },
+            CNC(low_add, hi_add) => {
+                if !self.get_flag(CARRY_BIT) {
+                    self.push(self.pc);
+                    self.pc = get_u16(hi_add, low_add);
+                }
+            },    
+            CZ(low_add, hi_add) => {
+                if self.get_flag(ZERO_BIT) {
+                    self.push(self.pc);
+                    self.pc = get_u16(hi_add, low_add);
+                }
+            },  
+            CNZ(low_add, hi_add) => {
+                if !self.get_flag(ZERO_BIT) {
+                    self.push(self.pc);
+                    self.pc = get_u16(hi_add, low_add);
+                }
+            },  
+            CM(low_add, hi_add) => {
+                if self.get_flag(SIGN_BIT) {
+                    self.push(self.pc);
+                    self.pc = get_u16(hi_add, low_add);
+                }
+            },  
+            CP(low_add, hi_add) => {
+                if !self.get_flag(SIGN_BIT) {
+                    self.push(self.pc);
+                    self.pc = get_u16(hi_add, low_add);
+                }
+            },
+            CPE(low_add, hi_add) => {
+                if self.get_flag(PARITY_BIT) {
+                    self.push(self.pc);
+                    self.pc = get_u16(hi_add, low_add);
+                }
+            },
+            CPO(low_add, hi_add) => {
+                if !self.get_flag(PARITY_BIT) {
+                    self.push(self.pc);
+                    self.pc = get_u16(hi_add, low_add);
+                }
+            },
+
+            RET => self.pc = self.pop(),
+            RC => if self.get_flag(CARRY_BIT) { self.pc = self.pop() },
+            RNC => if !self.get_flag(CARRY_BIT) { self.pc = self.pop() },
+            RZ => if self.get_flag(ZERO_BIT) { self.pc = self.pop() },
+            RNZ => if !self.get_flag(ZERO_BIT) { self.pc = self.pop() },
+            RM => if self.get_flag(SIGN_BIT) { self.pc = self.pop() },
+            RP => if !self.get_flag(SIGN_BIT) { self.pc = self.pop() },
+            RPE => if self.get_flag(PARITY_BIT) { self.pc = self.pop() },
+            RPO => if !self.get_flag(PARITY_BIT) { self.pc = self.pop() },
+
+            RST(exp) => {
+                self.push(self.pc);
+                self.pc = exp.wrapping_mul(8) as u16;
+            },
+            EI => self.inte = true,
+            DI => self.inte = false,
+
+            IN(device_no) => {
+                if let Some(device) = &mut self.devices[device_no as usize] {
+                    self.a = device.read();
+                } else {
+                    eprintln!("No such device.");
+                    self.halted = true;
+                }
+            },
+            OUT(device_no) => {
+                if let Some(device) = &mut self.devices[device_no as usize] {
+                    device.write(self.a);
+                } else {
+                    eprintln!("No such device.");
+                    self.halted = true;
+                }
+            },
+
+            HLT => self.halted = true,
         };
 
         Ok(())
@@ -425,6 +670,15 @@ impl Cpu {
         }
     }
 
+    fn push(&mut self, word: u16) {
+        self.sp = self.sp.wrapping_sub(2);
+        self.ram.save_word(self.sp, word);
+    }
+
+    fn pop(&mut self) -> u16 {
+        self.sp = self.sp.wrapping_add(2);
+        self.ram.load_word(self.sp.wrapping_sub(2))
+    }
 
     fn set_logical_flag(&mut self) {
         self.set_flag(CARRY_BIT, false);
@@ -435,32 +689,32 @@ impl Cpu {
     }
 
     fn set_flags(&mut self, carry: Option<bool>, parity: Option<bool>, aux: Option<bool>, zero: Option<bool>, sign: Option<bool>) {
-        carry.map(|carry| if carry { self.flag &= 1 << CARRY_BIT });
-        parity.map(|parity| if parity { self.flag &= 1 << PARITY_BIT });
-        aux.map(|auxiliary_carry| if auxiliary_carry { self.flag &= 1 << AUXILIARY_CARRY_BIT });
-        zero.map(|zero| if zero { self.flag &= 1 << ZERO_BIT });
-        sign.map(|sign| if sign { self.flag &= 1 << SIGN_BIT });
+        carry.map(|carry| bitset(&mut self.flag, CARRY_BIT, carry));
+        parity.map(|parity| bitset(&mut self.flag, PARITY_BIT, parity));
+        aux.map(|aux| bitset(&mut self.flag, AUXILIARY_CARRY_BIT, aux));
+        zero.map(|zero| bitset(&mut self.flag, ZERO_BIT, zero));
+        sign.map(|sign| bitset(&mut self.flag, SIGN_BIT, sign));
     }
 
-    fn set_flag(&mut self, bit: u8, flag: bool) {
-        let b = if flag {1} else {0};
-        self.flag &= b << bit;
+    pub(crate) fn set_flag(&mut self, bit: u8, flag: bool) {
+        bitset(&mut self.flag, bit, flag);
     }
 
-    fn get_flag(&self, bit: u8) -> bool {
-        (self.flag & (1 << bit)) >> bit == 1
+    pub(crate) fn get_flag(&self, bit: u8) -> bool {
+        let v = (self.flag & (1 << bit)) >> bit;
+        v == 1
     }
 
-    fn get_hl_addr(&self) -> u16 {
-        ((self.h as u16) << 8) | self.l as u16
+    pub(crate) fn get_hl_addr(&self) -> u16 {
+        get_u16(self.h, self.l)
     }
 
     fn get_bc_addr(&self) -> u16 {
-        ((self.b as u16) << 8) | self.c as u16
+        get_u16(self.b, self.c)
     }
 
     fn get_de_addr(&self) -> u16 {
-        ((self.d as u16) << 8) | self.e as u16
+        get_u16(self.d, self.e)
     }
 
     fn get_rp_val(&self, rp: RegPair) -> u16 {
@@ -469,11 +723,12 @@ impl Cpu {
             RegPair::DE => get_u16(self.d, self.e),
             RegPair::HL => get_u16(self.h, self.l),
             RegPair::PSW => get_u16(self.a, self.flag),
+            RegPair::SP => self.sp,
         }
     }
 
     fn next_byte(&mut self) -> u8 {
-        self.pc += 1;
+        self.pc = self.pc.wrapping_add(1);
         self.ram.load_byte(self.pc - 1)
     }
 }

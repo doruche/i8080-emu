@@ -10,18 +10,33 @@ pub fn bittest(bits: u8, n: u8) -> bool {
     (bits & (1 << n)) != 0
 }
 
+pub fn bitset(bits: &mut u8, whence: u8, set: bool) {
+    let mask = 1 << whence;
+    if set {
+        *bits |= mask;
+    } else {
+        *bits &= !mask;
+    }
+}
+
 // Carry, parity, auxiliary carry, zero, sign
 pub fn flagged_add(x: u8, y: u8) -> (u8, bool, bool, bool, bool, bool) {
     let (res, carry) = x.overflowing_add(y);
     (res,
     carry,
-    res % 2 == 0,
+    res.count_ones() % 2 == 0,
     (x & 0xf) + (y & 0xf) > 0xf,
     res == 0,
     (res & 0b10000000) >> 7 == 1)
 }
 pub fn flagged_sub(x: u8, y: u8) -> (u8, bool, bool, bool, bool, bool) {
-    flagged_add(x, !y + 1)
+    let (res, carry) = x.overflowing_sub(y);
+    (res,
+    x < y,
+    res.count_ones() % 2 == 0,
+    (x as i8 & 0xf) - (y as i8 & 0xf) >= 0x00,
+    res == 0,
+    (res & 0b10000000) >> 7 == 1)
 }
 
 pub fn idx2src(idx: u8) -> Src {
@@ -38,12 +53,22 @@ pub fn idx2src(idx: u8) -> Src {
     }
 }
 
-pub fn idx2rp(idx: u8) -> RegPair {
+pub fn idx2rp_psw(idx: u8) -> RegPair {
     match idx {
         0 => RegPair::BC,
         1 => RegPair::DE,
         2 => RegPair::HL,
         3 => RegPair::PSW,
+        _ => unreachable!(),
+    }
+}
+
+pub fn idx2rp_sp(idx: u8) -> RegPair {
+    match idx {
+        0 => RegPair::BC,
+        1 => RegPair::DE,
+        2 => RegPair::HL,
+        3 => RegPair::SP,
         _ => unreachable!(),
     }
 }

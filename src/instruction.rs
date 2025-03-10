@@ -25,9 +25,9 @@ pub enum Instruction {
     DCX(RegPair), XCHG, XTHL, SPHL,
 
     // Immediate instructions
-    LXI(u8, u8, u8), MVI(u8, u8), ADI(u8),
-    ACI(u8), SUI(u8), SBI(u8), ANI(u8),
-    XBI(u8), XRI(u8), ORI(u8), CPI(u8),
+    LXI(RegPair, u8, u8), MVI(Src, u8), 
+    ADI(u8), ACI(u8), SUI(u8), SBI(u8), 
+    ANI(u8), XRI(u8), ORI(u8), CPI(u8),
 
     STA(u8, u8), LDA(u8, u8), SHLD(u8, u8), LHLD(u8, u8),
 
@@ -45,7 +45,7 @@ pub enum Instruction {
     RNZ, RM, RP, RPE, RPO,
 
     // RST instructions
-    EI, DI,
+    RST(u8) ,EI, DI,
 
     // Input/Output instructions
     IN(u8), OUT(u8),
@@ -61,5 +61,5 @@ pub enum Src {
 
 #[derive(Debug, Clone, Copy)]
 pub enum RegPair {
-    BC, DE, HL, PSW,
+    BC, DE, HL, PSW, SP,
 }

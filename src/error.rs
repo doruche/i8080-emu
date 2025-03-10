@@ -5,6 +5,7 @@ use std::fmt::Display;
 #[derive(Debug)]
 pub enum Error {
     UnknownOpcode(u8),
+    PcOutofRange,
 }
 
 impl Display for Error {
@@ -13,6 +14,7 @@ impl Display for Error {
         use Error::*;
         match self {
             UnknownOpcode(opcode) => write!(f, "Invalid opcode {}.", opcode),
+            PcOutofRange => write!(f, "Program counter out of range."),
         }
     }
 }

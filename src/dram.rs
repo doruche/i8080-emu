@@ -14,6 +14,11 @@ impl Dram {
         }
     }
     
+    pub fn load_slice(&mut self, data: &[u8]) {
+        self.memory[0x100..(data.len() + 0x100)].copy_from_slice(data);
+        println!("image loaded.");
+    }
+
     pub fn get_ptr(&mut self, addr: u16) -> &mut u8 {
         &mut self.memory[addr as usize]
     }
