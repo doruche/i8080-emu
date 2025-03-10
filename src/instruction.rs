@@ -54,6 +54,12 @@ pub enum Instruction {
     HLT,
 }
 
+impl Instruction {
+    pub fn cycle_idx(&self) -> u8 {
+        todo!()
+    }
+}
+
 #[derive(Debug, Clone, Copy)]
 pub enum Src {
     B, C, D, E, H, L, A, Mem,

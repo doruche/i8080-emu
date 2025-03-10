@@ -27,7 +27,7 @@ pub fn flagged_add(x: u8, y: u8) -> (u8, bool, bool, bool, bool, bool) {
     res.count_ones() % 2 == 0,
     (x & 0xf) + (y & 0xf) > 0xf,
     res == 0,
-    (res & 0b10000000) >> 7 == 1)
+    bittest(res, 7))
 }
 pub fn flagged_sub(x: u8, y: u8) -> (u8, bool, bool, bool, bool, bool) {
     let (res, carry) = x.overflowing_sub(y);
@@ -36,7 +36,7 @@ pub fn flagged_sub(x: u8, y: u8) -> (u8, bool, bool, bool, bool, bool) {
     res.count_ones() % 2 == 0,
     (x as i8 & 0xf) - (y as i8 & 0xf) >= 0x00,
     res == 0,
-    (res & 0b10000000) >> 7 == 1)
+    bittest(res, 7))
 }
 
 pub fn idx2src(idx: u8) -> Src {

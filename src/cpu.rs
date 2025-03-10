@@ -13,8 +13,6 @@ use crate::utils::*;
 pub const RAM_SIZE: usize = 65536;
 
 const CLOCK_RATE: u32 = 2_000_000; // 2.0MHz
-const STEP_TIME: u32 = 16;
-const STEP_CYCLES: u32 = (STEP_TIME as f64 / (1000_f64 / CLOCK_RATE as f64)) as u32;
 const PORT_NUM: usize = 256;   // i8080 adopts PMIO.
 
 pub const CARRY_BIT: u8 = 0;
@@ -38,8 +36,6 @@ pub struct Cpu {
     pub halted: bool,
     pub flag: u8,
     pub inte: bool,
-    pub step_cycles: u32,
-    pub step_zero: time::SystemTime,
     pub ram: Dram,
     pub devices: [Option<Box<dyn Device>>; PORT_NUM],
 }
@@ -55,11 +51,9 @@ impl Cpu {
             e: 0,
             h: 0,
             l: 0,
-            sp: RAM_SIZE as u16,
+            sp: 0,
             pc: 0, // 0x00 ~ 0x3f for rst instructions.
             halted: false,
-            step_cycles: 0,
-            step_zero: time::SystemTime::now(),
             ram: Dram::new(),
             devices: [const { None }; PORT_NUM],
             flag: 2, // 0bsz0c0p1c
@@ -100,7 +94,9 @@ impl Cpu {
             if self.halted {
                 break Ok(());
             }
-            self.next()?;
+            let ins = self.fetch()?;
+            //println!("{:?}", ins);
+            self.excecute(ins)?;
             if self.pc == 0x05 {
                 if self.c == 0x09 {
                     let mut a = self.get_de_addr();
@@ -125,6 +121,8 @@ impl Cpu {
             }
         }
     }
+
+
 }
 
 // utils
@@ -400,8 +398,11 @@ impl Cpu {
                 Some(zero), Some(sign));
             },
             ANA(reg) => {
-                self.a &= *self.get_src(reg);
+                let a = self.a;
+                let src = *self.get_src(reg);
+                self.a &= src;
                 self.set_logical_flag();
+                self.set_flag(AUXILIARY_CARRY_BIT, ((a | src) & 0x08) != 0);
             },
             XRA(reg) => {
                 self.a ^= *self.get_src(reg);
@@ -412,7 +413,7 @@ impl Cpu {
                 self.set_logical_flag();
             },
             CMP(reg) => {
-                let (res, carry, parity, aux, zero, sign) = flagged_sub(self.a, *self.get_src(reg));
+                let (_, carry, parity, aux, zero, sign) = flagged_sub(self.a, *self.get_src(reg));
                 self.set_flags(Some(carry), Some(parity), Some(aux), Some(zero), Some(sign));
             },
             RLC => {
@@ -471,7 +472,7 @@ impl Cpu {
                     RegPair::BC => (self.b, self.c) = split_u16(x),
                     RegPair::DE => (self.d, self.e) = split_u16(x),
                     RegPair::HL => (self.h, self.l) = split_u16(x),
-                    RegPair::SP => self.sp = self.sp.wrapping_add(1),
+                    RegPair::SP => self.sp = x,
                     _ => unreachable!(),
                 };
             },
@@ -481,7 +482,7 @@ impl Cpu {
                     RegPair::BC => (self.b, self.c) = split_u16(x),
                     RegPair::DE => (self.d, self.e) = split_u16(x),
                     RegPair::HL => (self.h, self.l) = split_u16(x),
-                    RegPair::SP => self.sp = self.sp.wrapping_sub(1),
+                    RegPair::SP => self.sp = x,
                     _ => unreachable!(),
                 };
             },
@@ -501,7 +502,7 @@ impl Cpu {
                     RegPair::BC => (self.b, self.c) = (high_data, low_data),
                     RegPair::DE => (self.d, self.e) = (high_data, low_data),
                     RegPair::HL => (self.h, self.l) = (high_data, low_data),
-                    RegPair::SP => self.ram.save_word(self.sp, get_u16(high_data, low_data)),
+                    RegPair::SP => self.sp = get_u16(high_data, low_data),
                     _ => unreachable!(),
                 };
             },
@@ -512,10 +513,13 @@ impl Cpu {
                 self.set_flags(Some(carry), Some(parity), Some(aux), Some(zero), Some(sign));               
             },
             ACI(data) => {
-                let (res, carry, parity, aux, zero, sign) = 
-                flagged_add(self.a, data.wrapping_add(u8::from(self.get_flag(CARRY_BIT))));
+                let a = self.a;
+                let c = u8::from(self.get_flag(CARRY_BIT));
+                let (res, _, parity, _, zero, sign) = flagged_add(self.a, data.wrapping_add(c));
                 self.a = res;
-                self.set_flags(Some(carry), Some(parity), Some(aux), Some(zero), Some(sign));
+                self.set_flags(Some(u16::from(a) + u16::from(c) + u16::from(data) > 0xff), 
+                Some(parity), Some((a & 0xf) + (data & 0xf) + c > 0xf), 
+                Some(zero), Some(sign));
             },
             SUI(data) => {
                 let (res, carry, parity, aux, zero, sign) = flagged_sub(self.a, data);
@@ -685,7 +689,7 @@ impl Cpu {
         self.set_flag(PARITY_BIT, self.a.count_ones() % 2 == 0);
         self.set_flag(AUXILIARY_CARRY_BIT, false);
         self.set_flag(ZERO_BIT, self.a == 0);
-        self.set_flag(SIGN_BIT, self.a > 0x80);
+        self.set_flag(SIGN_BIT, self.a >= 0x80);
     }
 
     fn set_flags(&mut self, carry: Option<bool>, parity: Option<bool>, aux: Option<bool>, zero: Option<bool>, sign: Option<bool>) {
